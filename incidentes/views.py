@@ -1,3 +1,4 @@
+import paho.mqtt.publish as publish
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
@@ -265,26 +266,15 @@ def control_hardware(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def enviar_comando_mqtt(request):
-    """API para enviar comandos MQTT (si prefieres no usar MQTT directo en JS)"""
     try:
         data = json.loads(request.body)
         comando = data.get('comando')
         
-        # Aquí puedes usar paho-mqtt para enviar el comando
-        # Simulación por ahora
-        print(f"[MQTT SIMULADO] Enviando comando: {comando}")
-        
-        # Crear registro en la base de datos
-        dispositivo = Dispositivo.objects.filter(tipo='SIRENA').first()
-        if dispositivo:
-            AccionIoT.objects.create(
-                dispositivo=dispositivo,
-                tipo='COMANDO_DIRECTO',
-                accion=comando,
-                detalles={'origen': 'control_hardware'},
-                timestamp=timezone.now(),
-                resultado='ENVIADO'
-            )
+        # --- AQUÍ ESTÁ EL CAMBIO: ENVÍO REAL MQTT ---
+        # Enviamos el mensaje al Broker (Mosquitto) corriendo en esta misma PC
+        print(f"📡 Enviando MQTT real: {comando}")
+        publish.single("sagired/comandos", comando, hostname="127.0.0.1")
+        # --------------------------------------------
         
         return JsonResponse({
             'status': 'success',
@@ -292,7 +282,9 @@ def enviar_comando_mqtt(request):
             'timestamp': timezone.now().isoformat()
         })
     except Exception as e:
+        print(f"❌ Error MQTT: {e}")
         return JsonResponse({'status': 'error', 'error': str(e)}, status=500)
+
 
 # Otra opción más simple
 def control_simple(request):
@@ -300,20 +292,33 @@ def control_simple(request):
     return render(request, 'control_simple.html')
 
 # API para comandos básicos
+# En incidentes/views.py
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def comando_simple(request):
-    """API para comandos simples GET (más fácil de probar)"""
+    """API para comandos simples GET que ENVÍA MQTT REAL"""
     comando = request.GET.get('c', '')
     
     if comando:
-        # Guardar en base de datos
+        # --- 1. ENVIAR MQTT REAL ---
+        try:
+            print(f"📡 Enviando MQTT (GET): {comando}")
+            # Publicamos al mismo tema que escucha el ESP32
+            publish.single("sagired/comandos", comando, hostname="127.0.0.1")
+            resultado_envio = "ENVIADO"
+        except Exception as e:
+            print(f"❌ Error MQTT: {e}")
+            resultado_envio = f"ERROR: {str(e)}"
+
+        # --- 2. GUARDAR EN BASE DE DATOS (HISTORIAL) ---
+        # Buscamos o creamos el dispositivo para dejar registro
         dispositivo = Dispositivo.objects.filter(tipo='SIRENA').first()
         if not dispositivo:
             dispositivo = Dispositivo.objects.create(
                 nombre='ESP32_Sirena',
                 tipo='SIRENA',
-                direccion_red='192.168.0.8',
+                direccion_red='192.168.0.8', # Opcional: poner IP real si quieres
                 estado='ACTIVO'
             )
         
@@ -321,14 +326,15 @@ def comando_simple(request):
             dispositivo=dispositivo,
             tipo='COMANDO_GET',
             accion=comando,
-            detalles={'metodo': 'GET', 'params': dict(request.GET)},
+            detalles={'metodo': 'GET', 'origen': 'Navegador/Link'},
             timestamp=timezone.now(),
-            resultado='PENDIENTE'
+            resultado=resultado_envio
         )
         
         return JsonResponse({
             'status': 'success',
-            'message': f'Comando "{comando}" registrado',
+            'message': f'Comando "{comando}" enviado al hardware',
+            'mqtt_status': resultado_envio,
             'comando': comando,
             'timestamp': timezone.now().isoformat()
         })
